@@ -1,0 +1,13 @@
+# QuantConnect specific ignores
+backtests/
+live/
+__pycache__/
+.vscode/
+.idea/
+.vs/
+*.log
+
+# Python common ignores
+*.pyc
+*.pyd
+*.so
