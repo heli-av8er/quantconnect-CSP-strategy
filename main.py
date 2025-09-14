@@ -28,7 +28,7 @@ class VwmaCrossoverStrategy(QCAlgorithm):
 
         # --- Multi-Position Parameters ---
         self.max_concurrent_trades = 10
-        self.max_total_allocation = 0.2
+        self.max_total_allocation = 1.0
         self.allocation_per_trade = self.max_total_allocation / self.max_concurrent_trades
 
 
@@ -37,7 +37,7 @@ class VwmaCrossoverStrategy(QCAlgorithm):
         self.max_dte = 14
         self.roll_days_trigger = 3
         self.profit_target_price = 0.10
-        self.stop_loss_multiplier = 0.0
+        self.stop_loss_multiplier = -0.50
 
 
         # --- Data Setup ---
