@@ -1,99 +1,83 @@
 from AlgorithmImports import *
-
+from QuantConnect.Orders import *
+from datetime import timedelta
 
 class SymbolManager:
     """
-    Manages the indicators and logic for a single ETF.
-    This version is designed to work within a multi-position framework.
+    OVERHAULED: This version's entry logic is modified to find and
+    execute Bull Put Spreads instead of single puts.
     """
-    def __init__(self, algorithm, symbol, min_dte, max_dte):
+    def __init__(self, algorithm, symbol_str, min_dte, max_dte, slow_period, fast_period, spread_width):
         self.algorithm = algorithm
-        self.symbol = algorithm.add_equity(symbol, Resolution.HOUR).symbol
-       
-        option = algorithm.add_option(symbol, Resolution.MINUTE)
+        self.symbol = algorithm.add_equity(symbol_str, Resolution.HOUR).symbol
+        self.spread_width = spread_width
+        
+        option = algorithm.add_option(symbol_str, Resolution.MINUTE)
         option.set_filter(lambda u: u.weeklys_only().expiration(timedelta(min_dte), timedelta(max_dte)))
         self.option_symbol = option.symbol
 
-
-        self.vwma_slow = algorithm.vwma(self.symbol, 21, Resolution.HOUR)
-        self.vwma_fast = algorithm.vwma(self.symbol, 8, Resolution.HOUR)
-
+        self.vwma_slow = algorithm.vwma(self.symbol, slow_period, Resolution.HOUR)
+        self.vwma_fast = algorithm.vwma(self.symbol, fast_period, Resolution.HOUR)
 
     def is_trend_aligned(self):
-        """Checks if the instrument's own hourly trend is bullish."""
+        """Checks if the instrument's own hourly trend is bullish (V1 Logic)."""
+        if not self.vwma_fast.is_ready: return False
         return self.vwma_fast.current.value > self.vwma_slow.current.value
 
+    def attempt_trade_entry(self, allocation_per_trade, adx_value, slice, margin_per_spread):
+        """Finds two contracts and executes a Bull Put Spread."""
+        if not self.is_trend_aligned(): return
 
-    def check_risk_management(self, contract, entry_price, stop_multiplier, instrument_trend_aligned, regime_has_flipped):
-        """Implements the "stop and re-evaluate" logic for a single position."""
-        current_price = contract.price
-       
-        stop_price_triggered = current_price >= entry_price * stop_multiplier
-       
-        if not stop_price_triggered:
-            if regime_has_flipped:
-                return "Exit: Primary SOXX daily regime has flipped."
-            return None
-
-
-        self.algorithm.debug(f"Stop-loss trigger for {self.symbol}. Re-evaluating trend conditions...")
-
-
-        if instrument_trend_aligned and not regime_has_flipped:
-            self.algorithm.log("Holding position: Stop triggered, but local and regime trends remain aligned.")
-            return None
-
-
-        if regime_has_flipped:
-            return "Exit: Stop triggered AND primary SOXX daily regime has flipped."
-       
-        self.algorithm.log("Holding position: Stop triggered and local trend weak, but primary regime trend is still intact.")
-        return None
-
-
-    def attempt_trade_entry(self, allocation_per_trade, adx_value, slice):
-        """Finds and executes a new put sale using a fixed allocation per trade."""
-        if not self.is_trend_aligned():
-            return
-
-
-        self.algorithm.debug(f"Trend alignment confirmed for {self.symbol}. Assessing trade entry.")
-       
-        # Determine target delta from ADX
-        if adx_value > 40: target_delta = -0.5
-        elif 25 <= adx_value <= 40: target_delta = -0.4
-        else: target_delta = -0.3
-
-
+        # --- Find Short Leg (V1 Logic) ---
         option_chain = slice.option_chains.get(self.option_symbol)
         if not option_chain: return
 
-
         puts = [c for c in option_chain if c.right == OptionRight.PUT]
         if not puts: return
-       
+        
+        if adx_value > 40: target_delta = -0.5
+        elif 25 <= adx_value <= 40: target_delta = -0.4
+        else: target_delta = -0.3
+        
         puts_with_greeks = [p for p in puts if hasattr(p.greeks, 'delta') and p.greeks.delta != 0]
         if not puts_with_greeks: return
+        
+        # Sort by closest delta first, then by expiry to break ties
+        sorted_by_delta = sorted(puts_with_greeks, key=lambda c: abs(c.greeks.delta - target_delta))
+        if not sorted_by_delta: return
+        short_leg_contract = sorted_by_delta[0]
 
+        # --- Find Long Leg ---
+        long_strike = short_leg_contract.strike - self.spread_width
+        # Find all contracts with the matching long strike and expiry
+        long_leg_contracts = [c for c in puts if c.strike == long_strike and c.expiry == short_leg_contract.expiry]
+        if not long_leg_contracts: 
+            self.algorithm.log(f"Could not find matching long leg for strike {long_strike}")
+            return
+        long_leg_contract = long_leg_contracts[0]
 
-        sorted_puts = sorted(puts_with_greeks, key=lambda c: (c.expiry, abs(c.greeks.delta - target_delta)))
-        if not sorted_puts: return
-        chosen_contract = sorted_puts[0]
-
-
-        # Calculate position size using the FIXED allocation per trade from main.py
-        cash_required = chosen_contract.strike * 100
-        if cash_required == 0: return
-        # Use total_portfolio_value to size based on the entire account value
-        max_contracts = (self.algorithm.portfolio.total_portfolio_value * allocation_per_trade) / cash_required
-       
+        # --- Calculate Size and Submit Orders ---
+        if margin_per_spread <= 0: return
+        
+        # Calculate size based on defined risk
+        max_contracts = (self.algorithm.portfolio.total_portfolio_value * allocation_per_trade) / margin_per_spread
         if max_contracts < 1: return
-        quantity = -int(max_contracts)
-       
-        limit_price = chosen_contract.bid_price
-        if limit_price is None or limit_price <= 0: return
+        quantity = int(max_contracts)
 
+        # Ensure we have valid prices to place limit orders
+        if short_leg_contract.bid_price <= 0 or long_leg_contract.ask_price <= 0:
+             self.algorithm.log(f"Invalid prices for spread legs: Short Bid ${short_leg_contract.bid_price}, Long Ask ${long_leg_contract.ask_price}")
+             return
 
-        props = OrderProperties()
-        props.time_in_force = TimeInForce.DAY
-        self.algorithm.limit_order(chosen_contract.symbol, quantity, limit_price, order_properties=props)
+        # Use the short leg symbol as the unique identifier for the spread
+        if str(short_leg_contract.symbol) in self.algorithm.pending_entry_symbols:
+            return
+
+        # Submit orders with a tag to link them
+        tag = str(short_leg_contract.symbol)
+        self.algorithm.limit_order(short_leg_contract.symbol, -quantity, short_leg_contract.bid_price, tag=tag)
+        self.algorithm.limit_order(long_leg_contract.symbol, quantity, long_leg_contract.ask_price, tag=tag)
+        
+        self.algorithm.pending_entry_symbols.add(str(short_leg_contract.symbol))
+        self.algorithm.log(f"Submitted Bull Put Spread entry for {short_leg_contract.symbol.value}")
+
