@@ -34,7 +34,7 @@ class VwmaCrossoverStrategy(QCAlgorithm):
         self.max_concurrent_trades = 10
         self.max_total_allocation = 0.8 
         self.allocation_per_trade = self.max_total_allocation / self.max_concurrent_trades
-        self.profit_target_percentage = 0.95
+        self.profit_target_percentage = 0.95 # From your last successful test
         self.spread_width = 2.0 
 
         # --- General Strategy Parameters (V1) ---
@@ -57,7 +57,7 @@ class VwmaCrossoverStrategy(QCAlgorithm):
         # --- State Tracking ---
         self.open_spreads = {}
         self.pending_entry_symbols = set()
-        self.pending_fills = {} # NEW: Tracks partially filled spreads
+        self.pending_fills = {} # Tracks partially filled spreads
         self.last_trade_date = None
 
         self.set_warm_up(timedelta(days=self.regime_slow_period + 5))
@@ -91,7 +91,7 @@ class VwmaCrossoverStrategy(QCAlgorithm):
             
             manager = self.bull_manager if soxx_daily_bull else self.bear_manager
             margin_per_spread = self.spread_width * 100
-            manager.attempt_trade_entry(self.allocation_per_trade, adx_value, slice, margin_per_spread)
+            manager.attempt_trade_entry(self.allocation_per_trade, slice, margin_per_spread)
 
     def check_roll_condition(self, short_leg_symbol):
         option_security = self.securities.get(short_leg_symbol)
@@ -113,84 +113,93 @@ class VwmaCrossoverStrategy(QCAlgorithm):
         short_leg_symbol_str = order.tag
         if not short_leg_symbol_str: return
 
-        # --- Handle Canceled/Invalid Orders ---
         if order_event.status in [OrderStatus.CANCELED, OrderStatus.INVALID]:
             if short_leg_symbol_str in self.pending_entry_symbols:
                 self.pending_entry_symbols.remove(short_leg_symbol_str)
-            # If a partial fill was waiting, clean it up
             if short_leg_symbol_str in self.pending_fills:
                 del self.pending_fills[short_leg_symbol_str]
             return
 
         if order_event.status != OrderStatus.FILLED: return
 
-        # --- Handle Filled Orders ---
-        is_entry_order = order.direction in [OrderDirection.BUY, OrderDirection.SELL] and \
-                         short_leg_symbol_str in self.pending_entry_symbols
-
-        is_exit_order = order.direction in [OrderDirection.BUY, OrderDirection.SELL] and \
-                        short_leg_symbol_str in self.open_spreads
+        is_entry_order = short_leg_symbol_str in self.pending_entry_symbols
+        is_exit_order = short_leg_symbol_str in self.open_spreads
 
         if is_entry_order:
-            self.handle_spread_entry_fill(order, order_event)
+            self.handle_spread_entry_fill(order)
         elif is_exit_order:
             self.handle_spread_exit_fill(short_leg_symbol_str)
 
-    def handle_spread_entry_fill(self, order, order_event):
+    def handle_spread_entry_fill(self, order):
         """Robustly handles the filling of spread legs."""
         short_leg_symbol_str = order.tag
         
-        # If this is the second leg to fill, complete the spread
         if short_leg_symbol_str in self.pending_fills:
             partial_fill_data = self.pending_fills.pop(short_leg_symbol_str)
             first_leg_order = partial_fill_data['order']
             
-            short_order = order if order.direction == OrderDirection.SELL else first_leg_order
-            long_order = order if order.direction == OrderDirection.BUY else first_leg_order
+            # Determine which leg is which
+            is_call_spread = first_leg_order.symbol.id.option_right == OptionRight.CALL
+            
+            if is_call_spread:
+                long_order = order if order.direction == OrderDirection.BUY else first_leg_order
+                short_order = order if order.direction == OrderDirection.SELL else first_leg_order
+                net_debit = long_order.price - short_order.price
+                
+                # Using short leg string as key
+                self.open_spreads[str(short_order.symbol)] = {
+                    'net_cost': net_debit,
+                    'long_leg_symbol_str': str(long_order.symbol)
+                }
+                self.log(f"Bull Call Spread opened: {short_order.symbol}. Net Debit: ${net_debit:.2f}")
 
-            net_credit = short_order.price - long_order.price
+            else: # It's a Put Spread
+                short_order = order if order.direction == OrderDirection.SELL else first_leg_order
+                long_order = order if order.direction == OrderDirection.BUY else first_leg_order
+                net_credit = short_order.price - long_order.price
 
-            if net_credit <= 0:
-                self.liquidate_spread(SymbolCache.get_symbol(short_leg_symbol_str))
-                return
+                if net_credit <= 0:
+                    self.liquidate_spread(short_order.symbol)
+                    return
+                
+                self.open_spreads[str(short_order.symbol)] = {
+                    'net_cost': -net_credit, # Store as negative for consistency
+                    'long_leg_symbol_str': str(long_order.symbol)
+                }
+                self.log(f"Bull Put Spread opened: {short_order.symbol}. Net Credit: ${net_credit:.2f}")
 
-            self.open_spreads[short_leg_symbol_str] = {
-                'net_credit': net_credit,
-                'long_leg_symbol_str': str(self.find_long_leg_symbol(short_order.symbol))
-            }
             self.pending_entry_symbols.remove(short_leg_symbol_str)
             self.last_trade_date = self.time.date()
-            self.log(f"Bull Put Spread opened: {short_leg_symbol_str}. Net Credit: ${net_credit:.2f}")
+            self.set_spread_profit_taker(str(short_order.symbol))
 
-            # Set profit taker order for the spread
-            self.set_spread_profit_taker(short_leg_symbol_str, net_credit)
-
-        # If this is the first leg to fill, store it
         else:
             self.pending_fills[short_leg_symbol_str] = {'order': order}
 
-    def set_spread_profit_taker(self, short_leg_symbol_str, net_credit):
+    def set_spread_profit_taker(self, short_leg_symbol_str):
         """Creates GTC limit orders to close the spread at a profit."""
         if short_leg_symbol_str not in self.open_spreads: return
         
         trade_data = self.open_spreads[short_leg_symbol_str]
         long_leg_symbol = SymbolCache.get_symbol(trade_data['long_leg_symbol_str'])
         short_leg_symbol = SymbolCache.get_symbol(short_leg_symbol_str)
-        
-        profit_target_debit = round(net_credit * (1 - self.profit_target_percentage), 2)
-        if profit_target_debit < 0.01: profit_target_debit = 0.01
+        net_cost = trade_data['net_cost']
 
-        # This is a simplified way to create a spread closing order.
-        # A more advanced implementation might use Combo Orders if available.
-        # We buy back the short leg and sell the long leg.
-        short_qty = self.portfolio[short_leg_symbol].quantity
-        long_qty = self.portfolio[long_leg_symbol].quantity
+        if net_cost < 0: # Credit Spread
+            net_credit = -net_cost
+            profit_target_debit = round(net_credit * (1 - self.profit_target_percentage), 2)
+            if profit_target_debit < 0.01: profit_target_debit = 0.01
+            
+            # Buy back short, sell long
+            self.limit_order(short_leg_symbol, -self.portfolio[short_leg_symbol].quantity, profit_target_debit, tag=short_leg_symbol_str)
+            self.limit_order(long_leg_symbol, -self.portfolio[long_leg_symbol].quantity, 0.01, tag=short_leg_symbol_str)
+        else: # Debit Spread
+            max_profit = self.spread_width - net_cost
+            target_credit = round(net_cost + (max_profit * self.profit_target_percentage), 2)
+            
+            # Sell short, sell long
+            self.limit_order(short_leg_symbol, -self.portfolio[short_leg_symbol].quantity, target_credit, tag=short_leg_symbol_str)
+            self.limit_order(long_leg_symbol, -self.portfolio[long_leg_symbol].quantity, 0.01, tag=short_leg_symbol_str)
 
-        props = OrderProperties()
-        props.time_in_force = TimeInForce.GOOD_TIL_CANCELED
-
-        self.limit_order(short_leg_symbol, -short_qty, profit_target_debit, tag=short_leg_symbol_str, order_properties=props)
-        self.limit_order(long_leg_symbol, -long_qty, 0.01, tag=short_leg_symbol_str, order_properties=props)
         self.log(f"Submitted profit taker orders for spread {short_leg_symbol_str}.")
 
     def handle_spread_exit_fill(self, short_leg_symbol_str):
@@ -207,20 +216,9 @@ class VwmaCrossoverStrategy(QCAlgorithm):
             self.transactions.cancel_open_orders(short_leg_symbol)
             self.transactions.cancel_open_orders(long_leg_symbol)
 
-    def find_long_leg_symbol(self, short_leg_symbol):
-        return Symbol.create_option(
-            short_leg_symbol.underlying,
-            short_leg_symbol.id.market,
-            short_leg_symbol.id.option_style,
-            OptionRight.PUT,
-            short_leg_symbol.id.strike_price - self.spread_width,
-            short_leg_symbol.id.date
-        )
-
     def liquidate_spread(self, short_leg_symbol):
         short_leg_symbol_str = str(short_leg_symbol)
         
-        # Liquidate open positions
         if short_leg_symbol_str in self.open_spreads:
             trade_data = self.open_spreads[short_leg_symbol_str]
             long_leg_symbol = SymbolCache.get_symbol(trade_data['long_leg_symbol_str'])
@@ -229,7 +227,6 @@ class VwmaCrossoverStrategy(QCAlgorithm):
             if self.portfolio[long_leg_symbol].invested:
                 self.market_order(long_leg_symbol, -self.portfolio[long_leg_symbol].quantity, tag=short_leg_symbol_str)
         
-        # Cancel any open orders for pending spreads
         if short_leg_symbol_str in self.pending_entry_symbols:
              self.transactions.cancel_open_orders(short_leg_symbol)
 
