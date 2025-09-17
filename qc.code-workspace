@@ -2,7 +2,7 @@
     "folders": [
         {
             "name": "Project",
-            "path": "c:\\Users\\helia\\OneDrive\\Documents\\QuantConnect Documents\\Workspace\\Formal Light Brown Coyote"
+            "path": "c:\\Users\\helia\\OneDrive\\Documents\\QuantConnect Documents\\Workspace\\Main Strategy"
         }
     ],
     "settings": {
@@ -49,7 +49,10 @@
             "**/*.ipynb": false,
             "c:/Users/helia/OneDrive/Documents/QuantConnect Documents/Workspace/Formal Light Brown Coyote/**/*.py": false,
             "c:/Users/helia/OneDrive/Documents/QuantConnect Documents/Workspace/Formal Light Brown Coyote/**/*.cs": false,
-            "c:/Users/helia/OneDrive/Documents/QuantConnect Documents/Workspace/Formal Light Brown Coyote/**/*.ipynb": false
+            "c:/Users/helia/OneDrive/Documents/QuantConnect Documents/Workspace/Formal Light Brown Coyote/**/*.ipynb": false,
+            "c:/Users/helia/OneDrive/Documents/QuantConnect Documents/Workspace/Main Strategy/**/*.py": false,
+            "c:/Users/helia/OneDrive/Documents/QuantConnect Documents/Workspace/Main Strategy/**/*.cs": false,
+            "c:/Users/helia/OneDrive/Documents/QuantConnect Documents/Workspace/Main Strategy/**/*.ipynb": false
         }
     }
 }
