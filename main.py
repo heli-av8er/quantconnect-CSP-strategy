@@ -31,17 +31,17 @@ class VwmaCrossoverStrategy(QCAlgorithm):
         self.instrument_fast_period = 8
 
         # --- Portfolio and Risk Parameters ---
-        self.max_concurrent_trades = 10
+        self.max_concurrent_trades = 9
         self.max_total_allocation = 0.8 
         self.allocation_per_trade = self.max_total_allocation / self.max_concurrent_trades
-        self.profit_target_percentage = 0.95 # From your last successful test
-        self.spread_width = 2.0 
+        self.profit_target_percentage = 0.9 # From your last successful test
+        self.spread_width = 2.0 # Fixed width for spreads
 
         # --- General Strategy Parameters (V1) ---
         self.min_dte = 7
         self.max_dte = 14
         self.roll_days_trigger = 3
-        self.adx_trend_threshold = 20
+        self.adx_trend_threshold = 0
         
         # --- Data Setup ---
         self.soxx = self.add_equity(self.regime_etf, Resolution.HOUR).symbol
@@ -50,9 +50,9 @@ class VwmaCrossoverStrategy(QCAlgorithm):
         self.bear_manager = SymbolManager(self, self.bear_etf, self.min_dte, self.max_dte, self.instrument_slow_period, self.instrument_fast_period, self.spread_width)
 
         # --- Regime Indicator Setup ---
-        self.soxx_vwma_slow = self.vwma(self.soxx, self.regime_slow_period, Resolution.DAILY)
-        self.soxx_vwma_fast = self.vwma(self.soxx, self.regime_fast_period, Resolution.DAILY)
-        self.soxx_adx = self.adx(self.soxx, self.regime_adx_period, Resolution.DAILY)
+        self.soxx_vwma_slow = self.vwma(self.soxx, self.regime_slow_period, Resolution.HOUR)
+        self.soxx_vwma_fast = self.vwma(self.soxx, self.regime_fast_period, Resolution.HOUR)
+        self.soxx_adx = self.adx(self.soxx, self.regime_adx_period, Resolution.HOUR)
 
         # --- State Tracking ---
         self.open_spreads = {}
